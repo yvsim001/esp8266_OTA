@@ -65,7 +65,7 @@ void loop() {
   digitalWrite(LED, HIGH);  // éteint
   //delay(500);
 
-  delay(10);
+  delay(300000);
 }
 
 // --- OTA PULL (HTTPS, insecure pour démarrer) ---

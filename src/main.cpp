@@ -5,6 +5,7 @@
 #include <ESP8266httpUpdate.h>
 #include <WiFiClientSecureBearSSL.h>
 #include <ArduinoJson.h>
+#include <WiFiManager.h>  // <-- WiFiManager
 
 #ifndef FW_MODEL
 #define FW_MODEL "esp8266-power"
@@ -16,69 +17,85 @@
 #define FW_MANIFEST_URL "https://raw.githubusercontent.com/yvsim001/esp8266_OAT/main/manifest.json"
 #endif
 
-// --- PROTOTYPES ---
+// --- PROTOTYPE ---
 bool httpCheckAndUpdate();
 
-// --- SETUP / LOOP OBLIGATOIRES ---
 void setup() {
   Serial.begin(115200);
   delay(200);
+  Serial.println();
+  Serial.println(F("[BOOT]"));
 
-  // Connexion Wi-Fi minimale (remplace si tu utilises WiFiManager)
+  // ---- WiFi via WiFiManager (portail captif) ----
   WiFi.mode(WIFI_STA);
-  WiFi.begin("DasNetz", "-philipplucas-");            // <-- mets ton Wi-Fi provisoirement
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print('.');
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);            // 3 min pour saisir SSID/MdP
+  bool ok = wm.autoConnect("ESP8266-Setup"); // AP = ESP8266-Setup (sans mdp)
+  if (!ok) {
+    Serial.println(F("[WiFi] Echec config. Reboot..."));
+    delay(1000);
+    ESP.restart();
   }
-  Serial.println("\nWiFi OK: " + WiFi.localIP().toString());
+  Serial.print(F("[WiFi] OK: ")); Serial.println(WiFi.localIP());
 
-  // Rien d’autre d’obligatoire ici pour le test de lien.
+  // (Facultatif) régler l’heure NTP pour les timestamps si besoin
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  // Premier check OTA au démarrage
+  httpCheckAndUpdate();
 }
 
 void loop() {
   static uint32_t last = 0;
   uint32_t now = millis();
 
-  // test: check OTA toutes les 30s
-  if (now - last > 30000UL) {
-    Serial.println("Check OTA...");
+  // Check OTA toutes les 60 s (mets 600000 pour 10 min)
+  if (now - last > 60000UL) {
+    Serial.println(F("[OTA] Check..."));
     httpCheckAndUpdate();
     last = now;
   }
+
   delay(10);
 }
 
 // --- OTA PULL (HTTPS, insecure pour démarrer) ---
 bool httpCheckAndUpdate() {
   std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure();
+  client->setInsecure(); // simple pour démarrer (à durcir ensuite)
 
   HTTPClient http;
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);   // <--- important
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS); // suivre redirs (GitHub)
 
-  Serial.print("[OTA] GET: "); Serial.println(FW_MANIFEST_URL);
-  if (!http.begin(*client, String(FW_MANIFEST_URL))) return false;
+  Serial.print(F("[OTA] GET manifest: ")); Serial.println(FW_MANIFEST_URL);
+  if (!http.begin(*client, String(FW_MANIFEST_URL))) {
+    Serial.println(F("[OTA] http.begin() failed"));
+    return false;
+  }
 
   int code = http.GET();
-  Serial.print("[OTA] HTTP code: "); Serial.println(code);
-  if (code != 200) { http.end(); return false; }
+  Serial.printf("[OTA] HTTP code: %d (%s)\n", code, http.errorToString(code).c_str());
+  if (code != HTTP_CODE_OK) { http.end(); return false; }
 
   StaticJsonDocument<1024> doc;
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
-  if (err) { Serial.print("[OTA] JSON error: "); Serial.println(err.c_str()); return false; }
+  if (err) {
+    Serial.printf("[OTA] JSON error: %s\n", err.c_str());
+    return false;
+  }
 
   const char* model   = doc["model"]   | "";
   const char* version = doc["version"] | "";
   const char* url     = doc["url"]     | "";
-  Serial.printf("[OTA] model=%s version=%s url=%s\n", model, version, url);
 
-  if (String(model) != FW_MODEL) return false;
-  if (String(version) == FW_VERSION) { Serial.println("[OTA] déjà à jour"); return false; }
+  Serial.printf("[OTA] model=%s version=%s url=%s\n", model, version, url);
+  if (String(model) != FW_MODEL) { Serial.println(F("[OTA] Model mismatch")); return false; }
+  if (String(version) == FW_VERSION) { Serial.println(F("[OTA] Deja a jour")); return false; }
 
   ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   t_httpUpdate_return ret = ESPhttpUpdate.update(*client, String(url), String(FW_VERSION));
   Serial.printf("[OTA] result=%d (%s)\n", ret, ESPhttpUpdate.getLastErrorString().c_str());
+
   return (ret == HTTP_UPDATE_OK);
 }

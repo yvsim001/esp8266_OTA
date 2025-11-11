@@ -1,1 +1,5 @@
-
+{
+  "model": "esp8266-power",
+  "version": "v1.0.1",
+  "url": "https://raw.githubusercontent.com/yvsim001/esp8266_OAT/main/firmware.bin"
+}

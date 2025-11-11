@@ -14,7 +14,7 @@
 #define FW_VERSION "v1.0.0"
 #endif
 #ifndef FW_MANIFEST_URL
-#define FW_MANIFEST_URL "https://raw.githubusercontent.com/yvsim001/esp8266_OAT/main/manifest.json"
+#define FW_MANIFEST_URL "https://raw.githubusercontent.com/yvsim001/esp8266_OAT/gh-pages/manifest.json"
 #endif
 
 // Blink LED intégrée (D4 / GPIO2, active LOW)

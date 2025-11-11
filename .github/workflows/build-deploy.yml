@@ -1,0 +1,51 @@
+name: build-deploy-esp8266
+on:
+  push:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build
+        run: pio run -e d1_mini
+      - name: Set version
+        id: ver
+        run: |
+          VER=$(grep -oP '(?<=-D FW_VERSION=\\").*(?=\\")' platformio.ini || echo "0.0.0")
+          echo "ver=$VER" >> $GITHUB_OUTPUT
+      - name: Prepare artifacts
+        run: |
+          mkdir -p out
+          cp .pio/build/d1_mini/firmware.bin out/esp8266-power-${{ steps.ver.outputs.ver }}.bin
+          cat > out/manifest.json <<EOF
+          {
+            "model": "esp8266-power",
+            "version": "${{ steps.ver.outputs.ver }}",
+            "url": "http://pi.local/firmware/esp8266-power-${{ steps.ver.outputs.ver }}.bin"
+          }
+          EOF
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: out/*
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: firmware, path: out }
+      - name: Copy to Pi via SSH
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PI_HOST }}
+          username: ${{ secrets.PI_USER }}
+          key: ${{ secrets.PI_SSH_KEY }}
+          source: "out/*"
+          target: "/var/www/firmware"

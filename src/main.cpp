@@ -26,7 +26,7 @@ void setup() {
 
   // Connexion Wi-Fi minimale (remplace si tu utilises WiFiManager)
   WiFi.mode(WIFI_STA);
-  WiFi.begin("SSID", "PASSWORD");            // <-- mets ton Wi-Fi provisoirement
+  WiFi.begin("DasNetz", "-philipplucas-");            // <-- mets ton Wi-Fi provisoirement
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print('.');

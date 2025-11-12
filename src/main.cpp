@@ -11,7 +11,7 @@
 #define FW_MODEL "esp8266-power"
 #endif
 #ifndef FW_VERSION
-#define FW_VERSION "v1.0.0"
+#define FW_VERSION "v1.1.0"
 #endif
 #ifndef FW_MANIFEST_URL
 #define FW_MANIFEST_URL "https://raw.githubusercontent.com/yvsim001/esp8266_OAT/gh-pages/manifest.json"
@@ -121,18 +121,24 @@ bool httpCheckAndUpdate() {
     return false;
   }
 
-  // -------- 2) Faire l’update (client #2, NE PAS réutiliser cli1) --------
-  std::unique_ptr<BearSSL::WiFiClientSecure> cli2(new BearSSL::WiFiClientSecure);
-  cli2->setInsecure();
-  cli2->setTimeout(30000); // 30 s pour le binaire
+  // ... après avoir validé model/version/url ...
 
-  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  ESPhttpUpdate.rebootOnUpdate(true); // ou false si tu veux voir le log de fin
+// 2) OTA: NE PAS réutiliser le client du manifest
+std::unique_ptr<BearSSL::WiFiClientSecure> cli2(new BearSSL::WiFiClientSecure);
+cli2->setInsecure();
+cli2->setBufferSizes(1024, 1024);   // buffers TLS plus grands
+cli2->setTimeout(30000);            // 30 s pour le binaire
 
-  yield(); // nourrir le WDT avant opération longue
-  t_httpUpdate_return ret = ESPhttpUpdate.update(*cli2, String(url), String(FW_VERSION));
-  yield();
+ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+ESPhttpUpdate.setClientTimeout(30000);     // <- la bonne méthode sur ESP8266
+ESPhttpUpdate.rebootOnUpdate(true);        // optionnel
 
-  Serial.printf("[OTA] result=%d (%s)\n", ret, ESPhttpUpdate.getLastErrorString().c_str());
-  return (ret == HTTP_UPDATE_OK);
+yield();
+t_httpUpdate_return ret = ESPhttpUpdate.update(*cli2, String(url), String(FW_VERSION));
+yield();
+
+Serial.printf("[OTA] result=%d (%s)\n", ret, ESPhttpUpdate.getLastErrorString().c_str());
+return (ret == HTTP_UPDATE_OK);
+
+
 }

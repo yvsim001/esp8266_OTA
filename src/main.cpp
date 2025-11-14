@@ -19,166 +19,252 @@
 
 const int LED = LED_BUILTIN;
 
+// Global state
+bool isUpdating = false;
+uint32_t lastOtaCheck = 0;
+
 // --- PROTOTYPE ---
 bool httpCheckAndUpdate();
+void printMemoryStats();
 
 void setup() {
   Serial.begin(115200);
   pinMode(LED, OUTPUT);
-  delay(200);
+  digitalWrite(LED, HIGH);  // LED aus
+  
+  delay(500);
   Serial.println();
-  Serial.println(F("[BOOT]"));
+  Serial.println(F("[BOOT] ESP8266 OTA System"));
+  Serial.printf("[BOOT] Model: %s\n", FW_MODEL);
+  Serial.printf("[BOOT] Version: %s\n", FW_VERSION);
+  Serial.printf("[BOOT] Manifest: %s\n", FW_MANIFEST_URL);
+  
+  printMemoryStats();
 
   // ---- WiFi via WiFiManager ----
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
+  WiFi.setSleep(false);  // Deaktiviert WiFi-Sleep für stabilen Betrieb
+  
   WiFiManager wm;
   wm.setConfigPortalTimeout(180);
+  
+  Serial.println(F("[WiFi] Initializing..."));
   bool ok = wm.autoConnect("ESP8266-Setup");
+  
   if (!ok) {
-    Serial.println(F("[WiFi] Echec config. Reboot..."));
+    Serial.println(F("[WiFi] Config failed. Rebooting..."));
     delay(1000);
     ESP.restart();
   }
-  Serial.print(F("[WiFi] OK: ")); Serial.println(WiFi.localIP());
+  
+  Serial.print(F("[WiFi] Connected: "));
+  Serial.println(WiFi.localIP());
+  Serial.printf("[WiFi] Signal strength: %d dBm\n", WiFi.RSSI());
 
+  // NTP Zeit synchronisieren
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-
-  // Premier check OTA au démarrage
+  
+  // Erstes OTA-Check beim Boot
+  delay(2000);  // 2s warten für WiFi-Stabilität
   httpCheckAndUpdate();
+  
+  lastOtaCheck = millis();
 }
 
 void loop() {
-  static uint32_t last = 0;
   uint32_t now = millis();
 
-  // Check OTA toutes les 60 s
-  if (now - last > 60000UL) {
-    Serial.println(F("[OTA] Check..."));
+  // OTA-Check alle 60 Sekunden (ändern auf 600000 für 10 Min)
+  if ((now - lastOtaCheck) > 60000UL && !isUpdating) {
+    Serial.println(F("[LOOP] OTA check time..."));
     httpCheckAndUpdate();
-    last = now;
+    lastOtaCheck = now;
   }
 
-  digitalWrite(LED, HIGH);
-  delay(1000);
-  digitalWrite(LED, HIGH);
-  delay(1000);
+  // WiFi Signal Diagnostic
+  static uint32_t lastWiFiCheck = 0;
+  if ((now - lastWiFiCheck) > 10000) {
+    int rssi = WiFi.RSSI();
+    Serial.printf("[WiFi] Signal strength: %d dBm\\n", rssi);
+    
+    if (rssi > -50) Serial.println("[WiFi] Excellent signal");
+    else if (rssi > -70) Serial.println("[WiFi] Good signal");
+    else if (rssi > -80) Serial.println("[WiFi] Fair signal");
+    else Serial.println("[WiFi] Weak signal - OTA may fail!");
+    
+    lastWiFiCheck = now;
+  }
+  // LED Blinken (heartbeat)
+  static uint32_t ledToggle = 0;
+  if ((now - ledToggle) > 1000) {
+    digitalWrite(LED, !digitalRead(LED));
+    ledToggle = now;
+  }
 
-  delay(1000);
+  delay(100);
 }
 
-// --- OTA PULL (HTTPS) ---
-bool httpCheckAndUpdate() {
-  // Vérifier la mémoire disponible
-  uint32_t freeHeap = ESP.getFreeHeap();
-  Serial.printf("[OTA] Free heap: %u bytes\n", freeHeap);
+// --- HELPER: Memory Stats ---
+void printMemoryStats() {
+  Serial.printf("[MEM] Free heap: %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("[MEM] Heap fragmentation: %u%%\n", ESP.getHeapFragmentation());
+  Serial.printf("[MEM] Max free block: %u bytes\n", ESP.getMaxFreeBlockSize());
+}
 
-  if (freeHeap < 20000) {
-    Serial.println(F("[OTA] Insufficient memory"));
+// --- OTA PULL (HTTPS mit robustem Error-Handling) ---
+bool httpCheckAndUpdate() {
+  if (isUpdating) {
+    Serial.println(F("[OTA] Already updating, skipping"));
     return false;
   }
 
-  // -------- 1) Télécharger le manifest --------
-  std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
-  client->setInsecure();
+  // Memory check
+  uint32_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("[OTA] Starting OTA check. Free heap: %u bytes\n", freeHeap);
+  
+  if (freeHeap < 25000) {
+    Serial.printf("[OTA] Insufficient memory (%u < 25000)\n", freeHeap);
+    return false;
+  }
+
+  // ====== PHASE 1: Download Manifest ======
+  Serial.println(F("[OTA] === Phase 1: Fetch Manifest ==="));
+  
+  std::unique_ptr<BearSSL::WiFiClientSecure> manifestClient(new BearSSL::WiFiClientSecure);
+  manifestClient->setInsecure();
+  manifestClient->setTimeout(15000);
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.setTimeout(15000);
+  http.useHTTP10(true);
 
-  Serial.print(F("[OTA] GET manifest: "));
+  Serial.print(F("[OTA] GET: "));
   Serial.println(FW_MANIFEST_URL);
 
-  if (!http.begin(*client, String(FW_MANIFEST_URL))) {
+  if (!http.begin(*manifestClient, String(FW_MANIFEST_URL))) {
     Serial.println(F("[OTA] http.begin() failed"));
     return false;
   }
 
-  int code = http.GET();
-  Serial.printf("[OTA] HTTP code: %d\n", code);
+  int httpCode = http.GET();
+  Serial.printf("[OTA] HTTP Code: %d\n", httpCode);
 
-  if (code != HTTP_CODE_OK) {
+  if (httpCode != HTTP_CODE_OK) {
     http.end();
+    Serial.println(F("[OTA] Manifest download failed"));
     return false;
   }
 
-  // Parser le JSON
+  // Parse JSON
   DynamicJsonDocument doc(1024);
   DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
 
   if (err) {
-    Serial.printf("[OTA] JSON error: %s\n", err.c_str());
+    Serial.printf("[OTA] JSON parse error: %s\n", err.c_str());
     return false;
   }
 
-  const char* model   = doc["model"]   | "";
+  const char* model = doc["model"] | "";
   const char* version = doc["version"] | "";
-  const char* url     = doc["url"]     | "";
+  const char* url = doc["url"] | "";
 
-  Serial.printf("[OTA] model=%s version=%s\n", model, version);
+  Serial.printf("[OTA] Model: %s | Version: %s\n", model, version);
 
-  // Vérifier le modèle
+  // Validate manifest
+  if (strlen(model) == 0 || strlen(version) == 0 || strlen(url) == 0) {
+    Serial.println(F("[OTA] Invalid manifest (missing fields)"));
+    return false;
+  }
+
   if (strcmp(model, FW_MODEL) != 0) {
-    Serial.println(F("[OTA] Model mismatch"));
+    Serial.printf("[OTA] Model mismatch: %s != %s\n", model, FW_MODEL);
     return false;
   }
 
-  // Vérifier si mise à jour nécessaire
   if (strcmp(version, FW_VERSION) == 0) {
-    Serial.println(F("[OTA] Already up to date"));
+    Serial.println(F("[OTA] Already up-to-date"));
     return false;
   }
 
-  Serial.println(F("[OTA] New version available, updating..."));
-  Serial.printf("[OTA] URL: %s\n", url);
+  Serial.printf("[OTA] New version available! Current: %s -> New: %s\n", FW_VERSION, version);
 
-  // -------- 2) Effectuer la mise à jour OTA --------
-  // Créer un nouveau client pour la mise à jour
-  std::unique_ptr<BearSSL::WiFiClientSecure> updateClient(new BearSSL::WiFiClientSecure);
-  updateClient->setInsecure();
-  updateClient->setBufferSizes(2048, 1024);
+  // ====== PHASE 2: Download & Flash Firmware ======
+  Serial.println(F("[OTA] === Phase 2: Download & Flash ==="));
 
-  // Configurer ESPhttpUpdate
-  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  ESPhttpUpdate.rebootOnUpdate(false);  // Contrôle manuel du reboot
+  isUpdating = true;
+  
+  std::unique_ptr<BearSSL::WiFiClientSecure> fwClient(new BearSSL::WiFiClientSecure);
+  fwClient->setInsecure();
+  fwClient->setBufferSizes(2048, 1024);
+  fwClient->setTimeout(45000);
 
-  // Callbacks pour le progrès
+  // Watchdog & OTA Callbacks
+  ESP.wdtEnable(WDTO_8S);
+  
   ESPhttpUpdate.onStart([]() {
-    Serial.println(F("[OTA] Update started"));
-  });
-
-  ESPhttpUpdate.onEnd([]() {
-    Serial.println(F("[OTA] Update finished"));
+    Serial.println(F("[OTA] Update starting..."));
+    ESP.wdtDisable();  // WDT aus während Flash-Erase
+    digitalWrite(LED, LOW);  // LED an (updating)
   });
 
   ESPhttpUpdate.onProgress([](int cur, int total) {
-    Serial.printf("[OTA] Progress: %d%%\r", (cur * 100) / total);
+    static uint32_t lastPrint = 0;
+    uint32_t now = millis();
+    
+    if ((now - lastPrint) > 500) {  // Print alle 500ms
+      int percent = (total > 0) ? (cur * 100) / total : 0;
+      Serial.printf("[OTA] Progress: %d%% (%d/%d bytes)\r", percent, cur, total);
+      lastPrint = now;
+    }
+    
+    yield();        // Gibt anderen Tasks CPU-Zeit
+    ESP.wdtFeed();  // Füttert Watchdog
+  });
+
+  ESPhttpUpdate.onEnd([]() {
+    Serial.println(F("\n[OTA] Update complete"));
+    ESP.wdtEnable(WDTO_8S);
+    digitalWrite(LED, HIGH);  // LED aus
   });
 
   ESPhttpUpdate.onError([](int err) {
-    Serial.printf("[OTA] Error: %d - %s\n", err, ESPhttpUpdate.getLastErrorString().c_str());
+    Serial.printf("[OTA] Update error: %d - %s\n", err, ESPhttpUpdate.getLastErrorString().c_str());
+    ESP.wdtEnable(WDTO_8S);
+    digitalWrite(LED, HIGH);
   });
 
-  // Lancer la mise à jour
-  t_httpUpdate_return ret = ESPhttpUpdate.update(*updateClient, String(url));
+  // Starte Update
+  ESPhttpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  ESPhttpUpdate.rebootOnUpdate(false);
 
+  Serial.printf("[OTA] Downloading from: %s\n", url);
+  t_httpUpdate_return ret = ESPhttpUpdate.update(*fwClient, String(url));
+
+  isUpdating = false;
+
+  // Handle result
   switch (ret) {
     case HTTP_UPDATE_FAILED:
-      Serial.printf("[OTA] Update failed: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+      Serial.printf("[OTA] FAILED: %s\n", ESPhttpUpdate.getLastErrorString().c_str());
+      printMemoryStats();
       return false;
 
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.println(F("[OTA] No updates"));
+      Serial.println(F("[OTA] No updates available"));
       return false;
 
     case HTTP_UPDATE_OK:
       Serial.println(F("[OTA] Update OK! Rebooting..."));
-      delay(1000);
+      delay(2000);
       ESP.restart();
       return true;
+
+    default:
+      Serial.printf("[OTA] Unknown result: %d\n", ret);
+      return false;
   }
 
   return false;
 }
-

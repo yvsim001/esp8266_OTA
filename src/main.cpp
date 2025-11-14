@@ -169,6 +169,8 @@ bool httpCheckAndUpdate() {
   printMemoryStats();
   
   // === PHASE 2: OTA Update mit kleineren Buffern ===
+
+  
   Serial.println(F("[OTA] Starting download..."));
   
   isUpdating = true;
